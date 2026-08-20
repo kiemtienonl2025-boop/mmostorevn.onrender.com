@@ -61,20 +61,31 @@ router.get('/:id/accounts', requireAdmin, (req, res) => {
   res.json({ accounts: rows });
 });
 
-// Admin: bulk add credentials — mỗi dòng là 1 tài khoản, nội dung tự do (không bắt buộc định dạng gì cả).
+// Admin: bulk add credentials, one per line as "username:password" or "username:password:extra info".
 router.post('/:id/accounts', requireAdmin, (req, res) => {
   const product = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
   if (!product) return res.status(404).json({ error: 'Không tìm thấy sản phẩm.' });
 
-  const raw = (req.body.lines || '').replace(/\r\n/g, '\n');
-  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-  if (lines.length === 0) return res.status(400).json({ error: 'Chưa nhập nội dung nào.' });
+  const raw = (req.body.lines || '').trim();
+  if (!raw) return res.status(400).json({ error: 'Chưa nhập tài khoản nào.' });
 
-  const insert = db.prepare('INSERT INTO product_accounts (product_id, content) VALUES (?, ?)');
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  const insert = db.prepare(
+    'INSERT INTO product_accounts (product_id, username, password, extra_info) VALUES (?, ?, ?, ?)'
+  );
+  let added = 0;
   const tx = db.transaction(() => {
     for (const line of lines) {
-      insert.run(product.id, line);
+      const parts = line.split(':');
+      if (parts.length < 2) continue; // bỏ qua dòng sai định dạng
+      const username = parts[0].trim();
+      const password = parts[1].trim();
+      const extra = parts.slice(2).join(':').trim() || null;
+      if (!username || !password) continue;
+      insert.run(product.id, username, password, extra);
+      added++;
     }
+    // Cập nhật tồn kho = số tài khoản chưa giao cho đơn nào.
     const available = db.prepare(
       'SELECT COUNT(*) AS c FROM product_accounts WHERE product_id = ? AND order_id IS NULL'
     ).get(product.id).c;
@@ -82,7 +93,7 @@ router.post('/:id/accounts', requireAdmin, (req, res) => {
   });
   tx();
 
-  res.json({ added: lines.length });
+  res.json({ added, skipped: lines.length - added });
 });
 
 // Admin: delete a single unused credential (only if not yet delivered to a customer).
